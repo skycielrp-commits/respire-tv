@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+  #yt, #tw, #vid { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: none; background: #000; }
+  #tw iframe { width: 100%; height: 100%; border: 0; }
+  /* Message affiché sur l'écran quand rien ne joue (chargement, erreur) */
+  #status { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+            font-family: Arial, sans-serif; color: #fff; text-align: center; padding: 60px; background: #0b0a1f; z-index: 5; }
+  #status b { font-size: 64px; letter-spacing: 6px; color: #ff2e92; text-shadow: 0 0 30px #ff2e92; }
+  #status span { font-size: 34px; color: #2fd8ff; max-width: 1100px; line-height: 1.35; }
+  #status.hide { display: none; }
+</style>
+</head>
+<body>
+<div id="yt"></div>
+<div id="tw"></div>
+<video id="vid" playsinline></video>
+<div id="status"><b>RESPIRE TV</b><span id="status-txt">Écran prêt</span></div>
+
+<script src="https://www.youtube.com/iframe_api"></script>
+<script src="https://player.twitch.tv/js/embed/v1.js"></script>
+<script>
+  const params = new URLSearchParams(location.search);
+  const TW_PARENT = params.get('parent') || location.hostname || 'localhost';
+
+  let yt = null, ytApiReady = false, queued = null;
+  let tw = null, current = null, volume = 0;
+  const el = id => document.getElementById(id);
+
+  // Message à l'écran (chargement / erreur) ; caché pendant la lecture
+  function status(txt) {
+    if (txt) { el('status-txt').textContent = txt; el('status').classList.remove('hide'); }
+    else el('status').classList.add('hide');
+  }
+  const YT_ERRORS = {
+    2: 'Lien YouTube invalide.',
+    5: 'Cette vidéo ne peut pas être lue ici.',
+    100: 'Vidéo introuvable ou privée.',
+    101: 'Le propriétaire de cette vidéo interdit sa lecture hors de YouTube. Essaie une autre vidéo (les clips officiels sont souvent bloqués).',
+    150: 'Le propriétaire de cette vidéo interdit sa lecture hors de YouTube. Essaie une autre vidéo (les clips officiels sont souvent bloqués).',
+    152: 'Le propriétaire de cette vidéo interdit sa lecture hors de YouTube.',
+    153: 'YouTube refuse la page du lecteur (erreur 153) : héberge-la sur GitHub Pages (sky_media/github_page/LISEZMOI.txt).',
+  };
+  setTimeout(() => { if (!ytApiReady && current && current.media.kind === 'youtube') status('Impossible de charger YouTube (connexion bloquée ?).'); }, 10000);
+
+  function show(which) {
+    ['yt', 'tw', 'vid'].forEach(k => { const e = el(k); if (e) e.style.display = (k === which) ? 'block' : 'none'; });
+  }
+
+  window.onYouTubeIframeAPIReady = function () {
+    ytApiReady = true;
+    if (queued) { const q = queued; queued = null; loadYouTube(q.m, q.pos, q.paused); }
+  };
+
+  let loadToken = 0;
+  function loadYouTube(m, pos, paused) {
+    status('Chargement de la vidéo…');
+    // Toujours rien après 8 s : on montre ce qu'affiche YouTube lui-même (son message d'erreur, ex. 153)
+    const tok = ++loadToken;
+    // Lecture bloquée par le navigateur (lecture auto avec le son) : on relance en muet puis on remet le son
+    setTimeout(() => {
+      if (tok !== loadToken || !yt || !yt.getPlayerState || paused) return;
+      if (yt.getPlayerState() !== YT.PlayerState.PLAYING) { yt.mute(); yt.playVideo(); }
+    }, 3500);
+    // Toujours rien après 10 s : YouTube refuse de jouer depuis cette page
+    setTimeout(() => {
+      if (tok !== loadToken || paused) return;
+      const st = yt && yt.getPlayerState ? yt.getPlayerState() : -1;
+      if (st !== YT.PlayerState.PLAYING && st !== YT.PlayerState.BUFFERING) {
+        status('YouTube refuse de lire depuis la page du jeu. Héberge la page sur GitHub Pages (sky_media/github_page/LISEZMOI.txt). Un lien .mp4 doit marcher en attendant.');
+      }
+    }, 10000);
+    if (!ytApiReady) { queued = { m, pos, paused }; return; }
+    const start = Math.floor(pos || 0);
+    show('yt');
+    if (!yt) {
+      const vars = { autoplay: 1, controls: 0, disablekb: 1, rel: 0, modestbranding: 1, iv_load_policy: 3, playsinline: 1, start };
+      // Adresse d'origine du lecteur (YouTube l'exige, sinon « Erreur 153 »)
+      if (location.protocol === 'https:') { vars.origin = location.origin; vars.widget_referrer = location.href; }
+      if (m.list) { vars.listType = 'playlist'; vars.list = m.list; }
+      yt = new YT.Player('yt', {
+        width: '100%', height: '100%',
+        host: 'https://www.youtube.com',
+        videoId: m.list ? undefined : m.id,
+        playerVars: vars,
+        events: {
+          onReady: e => {
+            e.target.setVolume(volume * 100);
+            if (!m.list) e.target.seekTo(start, true);
+            paused ? e.target.pauseVideo() : e.target.playVideo();
+            show('yt');
+          },
+          onError: e => status(YT_ERRORS[e.data] || ('Erreur YouTube ' + e.data + '.')),
+          onStateChange: e => {
+            if (e.data === YT.PlayerState.PLAYING || e.data === YT.PlayerState.PAUSED) status(null);
+            if (e.data === YT.PlayerState.PLAYING && e.target.isMuted && e.target.isMuted()) { e.target.unMute(); e.target.setVolume(volume * 100); }
+            if (e.data === YT.PlayerState.ENDED && current && current.loop && current.media.kind === 'youtube') {
+              e.target.seekTo(0, true); e.target.playVideo();
+            }
+          }
+        }
+      });
+    } else {
+      if (m.list) yt.loadPlaylist({ list: m.list, listType: 'playlist', index: 0 });
+      else yt.loadVideoById({ videoId: m.id, startSeconds: start });
+      yt.setVolume(volume * 100);
+      if (paused) setTimeout(() => yt.pauseVideo(), 400);
+    }
+  }
+
+  function loadTwitch(m) {
+    status(null);
+    show('tw');
+    el('tw').innerHTML = '';
+    if (typeof Twitch === 'undefined') return;
+    tw = new Twitch.Player('tw', { channel: m.channel, parent: [TW_PARENT], width: '100%', height: '100%', autoplay: true, muted: false });
+    tw.addEventListener(Twitch.Player.READY, () => { tw.setMuted(false); tw.setVolume(volume); });
+  }
+
+  function loadFile(m, pos, paused, loop) {
+    status('Chargement de la vidéo…');
+    const v = el('vid');
+    v.onplaying = () => status(null);
+    v.onerror = () => status('Impossible de lire ce fichier vidéo.');
+    show('vid');
+    v.loop = !!loop;
+    v.volume = volume;
+    v.src = m.src;
+    v.onloadedmetadata = () => {
+      if (pos && isFinite(v.duration)) v.currentTime = loop ? pos % v.duration : Math.min(pos, v.duration);
+      paused ? v.pause() : v.play().catch(() => {});
+    };
+  }
+
+  function stopAll() {
+    current = null;
+    if (yt && yt.stopVideo) yt.stopVideo();
+    if (tw) { try { tw.pause(); } catch (e) {} el('tw').innerHTML = ''; tw = null; }
+    const v = el('vid'); v.onerror = null; v.pause(); v.removeAttribute('src'); v.load();
+    show(null);
+    status('Écran prêt');
+  }
+
+  function setVolume(val) {
+    volume = Math.max(0, Math.min(1, val || 0));
+    if (yt && yt.setVolume) yt.setVolume(volume * 100);
+    if (tw) { try { tw.setVolume(volume); } catch (e) {} }
+    el('vid').volume = volume;
+  }
+
+  function pause() {
+    if (!current) return;
+    const k = current.media.kind;
+    if (k === 'youtube' && yt) yt.pauseVideo();
+    else if (k === 'twitch' && tw) tw.pause();
+    else el('vid').pause();
+  }
+
+  function resume(pos) {
+    if (!current) return;
+    const k = current.media.kind;
+    if (k === 'youtube' && yt) { if (!current.media.list && pos != null) yt.seekTo(Math.floor(pos), true); yt.playVideo(); }
+    else if (k === 'twitch' && tw) tw.play();
+    else { const v = el('vid'); if (pos != null && isFinite(v.duration)) v.currentTime = current.loop ? pos % v.duration : pos; v.play().catch(() => {}); }
+  }
+
+  window.addEventListener('message', ev => {
+    let d = ev.data;
+    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) { return; } }
+    if (!d || !d.action) return;
+    switch (d.action) {
+      case 'load':
+        stopAll();
+        current = { media: d.media, loop: d.loop };
+        volume = d.volume || 0;
+        if (d.media.kind === 'youtube') loadYouTube(d.media, d.position, d.paused);
+        else if (d.media.kind === 'twitch') loadTwitch(d.media);
+        else loadFile(d.media, d.position, d.paused, d.loop);
+        break;
+      case 'stop': stopAll(); break;
+      case 'volume': setVolume(d.value); break;
+      case 'pause': pause(); break;
+      case 'resume': resume(d.position); break;
+    }
+  });
+</script>
+</body>
+</html>
