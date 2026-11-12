@@ -12,18 +12,13 @@
   #status b { font-size: 64px; letter-spacing: 6px; color: #ff2e92; text-shadow: 0 0 30px #ff2e92; }
   #status span { font-size: 34px; color: #2fd8ff; max-width: 1100px; line-height: 1.35; }
   #status.hide { display: none; }
-  /* Bandeau de diagnostic : laisse voir ce que YouTube affiche au-dessus */
-  #status.banner { inset: auto 0 0 0; padding: 18px 40px; background: rgba(11, 10, 31, .88); gap: 6px; }
-  #status.banner b { font-size: 26px; letter-spacing: 3px; text-shadow: none; }
-  #status.banner span { font-size: 22px; }
-  #dbg { font-size: 18px !important; color: #9a96c0 !important; }
 </style>
 </head>
 <body>
 <div id="yt"></div>
 <div id="tw"></div>
 <video id="vid" playsinline></video>
-<div id="status"><b>RESPIRE TV</b><span id="status-txt">Écran prêt</span><span id="dbg"></span></div>
+<div id="status"><b>RESPIRE TV</b><span id="status-txt">Écran prêt</span></div>
 
 <script src="https://www.youtube.com/iframe_api"></script>
 <script src="https://player.twitch.tv/js/embed/v1.js"></script>
@@ -35,19 +30,11 @@
   let tw = null, current = null, volume = 0;
   const el = id => document.getElementById(id);
 
-  // Message à l'écran (chargement / erreur) ; caché pendant la lecture
-  function status(txt, banner) {
-    el('status').classList.toggle('banner', !!banner);
+  // Écran plein « RESPIRE TV » (chargement / erreur) ; caché pendant la lecture
+  function status(txt) {
     if (txt) { el('status-txt').textContent = txt; el('status').classList.remove('hide'); }
     else el('status').classList.add('hide');
   }
-  // Diagnostic affiché sur l'écran (petite ligne grise)
-  const D = { api: 'non chargée', ready: 'non', state: '—', err: '—' };
-  const STATES = { '-1': 'non démarré', 0: 'terminé', 1: 'lecture', 2: 'pause', 3: 'mise en mémoire', 5: 'en attente' };
-  function dbg() {
-    el('dbg').textContent = `API YouTube : ${D.api} · lecteur prêt : ${D.ready} · état : ${D.state} · erreur : ${D.err} · page : ${location.host || location.protocol}`;
-  }
-  dbg();
   const YT_ERRORS = {
     2: 'Lien YouTube invalide.',
     5: 'Cette vidéo ne peut pas être lue ici.',
@@ -64,29 +51,27 @@
   }
 
   window.onYouTubeIframeAPIReady = function () {
-    ytApiReady = true; D.api = 'ok'; dbg();
+    ytApiReady = true;
     if (queued) { const q = queued; queued = null; loadYouTube(q.m, q.pos, q.paused); }
   };
 
   let loadToken = 0;
   function loadYouTube(m, pos, paused) {
     status('Chargement de la vidéo…');
-    D.err = '—'; D.state = '—'; dbg();
-    // Toujours rien après 8 s : on montre ce qu'affiche YouTube lui-même (son message d'erreur, ex. 153)
+    // Lecture auto avec le son parfois bloquée par le navigateur (le lecteur reste « non démarré ») :
+    // on relance en muet toutes les 2 s, et le son revient dès que la vidéo joue.
     const tok = ++loadToken;
-    // Lecture bloquée par le navigateur (lecture auto avec le son) : on relance en muet puis on remet le son
-    setTimeout(() => {
-      if (tok !== loadToken || !yt || !yt.getPlayerState || paused) return;
-      if (yt.getPlayerState() !== YT.PlayerState.PLAYING) { yt.mute(); yt.playVideo(); }
-    }, 3500);
-    // Toujours rien après 10 s : YouTube refuse de jouer depuis cette page
-    setTimeout(() => {
-      if (tok !== loadToken || paused || D.err !== '—') return;
-      const st = yt && yt.getPlayerState ? yt.getPlayerState() : -1;
-      if (st !== YT.PlayerState.PLAYING && st !== YT.PlayerState.BUFFERING) {
-        status('La vidéo ne démarre pas. Ce que YouTube affiche est visible au-dessus de ce bandeau.', true);
+    let tries = 0;
+    const kick = () => {
+      if (tok !== loadToken || !current || current.media.kind !== 'youtube' || paused) return;
+      if (yt && yt.getPlayerState) {
+        const st = yt.getPlayerState();
+        if (st === YT.PlayerState.PLAYING) return;
+        if (st !== YT.PlayerState.BUFFERING) { yt.mute(); yt.playVideo(); }
       }
-    }, 10000);
+      if (++tries < 15) setTimeout(kick, 2000);
+    };
+    setTimeout(kick, 2500);
     if (!ytApiReady) { queued = { m, pos, paused }; return; }
     const start = Math.floor(pos || 0);
     show('yt');
@@ -102,15 +87,14 @@
         playerVars: vars,
         events: {
           onReady: e => {
-            D.ready = 'oui'; dbg();
             e.target.setVolume(volume * 100);
             if (!m.list) e.target.seekTo(start, true);
             paused ? e.target.pauseVideo() : e.target.playVideo();
+            if (paused) status(null);   // télé en pause : on montre l'image figée
             show('yt');
           },
-          onError: e => { D.err = String(e.data); dbg(); status(YT_ERRORS[e.data] || ('Erreur YouTube ' + e.data + '.')); },
+          onError: e => { status(YT_ERRORS[e.data] || ('Erreur YouTube ' + e.data + '.')); },
           onStateChange: e => {
-            D.state = STATES[e.data] || String(e.data); dbg();
             if (e.data === YT.PlayerState.PLAYING || e.data === YT.PlayerState.PAUSED) status(null);
             if (e.data === YT.PlayerState.PLAYING && e.target.isMuted && e.target.isMuted()) { e.target.unMute(); e.target.setVolume(volume * 100); }
             if (e.data === YT.PlayerState.ENDED && current && current.loop && current.media.kind === 'youtube') {
@@ -123,7 +107,7 @@
       if (m.list) yt.loadPlaylist({ list: m.list, listType: 'playlist', index: 0 });
       else yt.loadVideoById({ videoId: m.id, startSeconds: start });
       yt.setVolume(volume * 100);
-      if (paused) setTimeout(() => yt.pauseVideo(), 400);
+      if (paused) setTimeout(() => { yt.pauseVideo(); status(null); }, 400);
     }
   }
 
